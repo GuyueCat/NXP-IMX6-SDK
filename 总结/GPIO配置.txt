@@ -1,0 +1,67 @@
+step 1:GPIO 配置流程
+1、使能 GPIO 对应的时钟。
+2、设置寄存器 IOMUXC_SW_MUX_CTL_PAD_XX_XX，设置 IO 的复用功能，使其复用为 GPIO 功能。
+3、设置寄存器 IOMUXC_SW_PAD_CTL_PAD_XX_XX，设置 IO 的上下拉、速度等等。
+4、第2步已经将 IO 复用为了 GPIO 功能，所以需要配置 GPIO，设置输入/输出、是否使用中断、默认输出电平等。
+
+step 2:代码分析
+A:使能 GPIO1 时钟, CCM_CCGR0 
+	/* CMM 有 CCM_CCGR0~CCM_CCGR6 这 7 个寄存器，这 7 个寄存器控制着 I.MX6U 的所有外设时钟开关，
+	 * CCM_CCGR0 是个 32 位寄存器，其中每 2 位控制一个外设的时钟，比如 bit31:30 控制着 GPIO2 的外设时钟，两个位就有 4 种操作方式，
+	 * 00 所有模式下都关闭外设时钟。01 只有在运行模式下打开外设时钟，等待模式和停止模式下均关闭外设时钟。
+	 * 10 未使用(保留)。11 除了停止模式以外，其他所有模式下时钟都打开。
+code:
+	/* 使能CCM_CCGR0 时钟 */
+	CCM_CCGR0 = 0xffffffff;
+
+
+B:设置 GPIO1_IO03 的 IO 复用功能
+	/* 选用 IOMUXC_SW_MUX_CTL_PAD_GPIO1_IO00寄存器，根据datasheet，寄存器地址为 0X020E005C，这个寄存器是 32 位的，但是只用到了最低 5 位，
+	 * bit0~bit3(MUX_MODE)就是设置 GPIO1_IO00 的复用功能,GPIO1_IO00 一共可以复用为 9种功能 IO，分别对应 ALT0~ALT8，
+	 * 其中 ALT5 就是作为 GPIO1_IO00。(选择哪路GPIO，根据代码中定义的地址来选择，复用哪路功能，根据ALT的选择来判断)
+	 */	 
+code:
+	/* 寄存器地址 */
+	#define SW_MUX_GPIO1_IO03 	*((volatile unsigned int *)0X020E0068)
+	/* 初始化IO复用功能 */
+	SW_MUX_GPIO1_IO03 = 0x5;
+
+
+C:配置 GPIO1_IO03 的 IO 配置
+	/* 选用 IOMUXC_SW_PAD_CTL_PAD_GPIO1_IO00 寄存器，寄存器地址为 0X020E02E8， 32 位寄存器，但是只用到了其中的低 17 位
+	 * 用来配置 GPIO1_IO00 的速度设置、驱动能力设置、压摆率设置等。
+code:
+	/* 配置GPIO1_IO03的IO属性	
+	 * bit 16:0 HYS关闭
+	 * bit [15:14]: 00 默认下拉
+     * bit [13]: 0 kepper功能
+     * bit [12]: 1 pull/keeper使能
+     * bit [11]: 0 关闭开路输出
+     * bit [7:6]: 10 速度100Mhz
+     * bit [5:3]: 110 R0/6驱动能力
+     * bit [0]: 0 低转换率
+     */
+	SW_PAD_GPIO1_IO03 = 0X10B0;	
+	
+	
+D:设置 GPIO
+	/* 当 IO 用作 GPIO 的时候需要设置的寄存器，一共有八个：DR、 GDIR、 PSR、 ICR1、 ICR2、 EDGE_SEL、 IMR 和 ISR。
+	 * DR 寄存器，此寄存器是数据寄存器， 当 GPIO 被配置为输出功能以后，向指定的位写入数据那么相应的 IO 就会输出相
+	 * 应的高低电平，比如要设置 GPIO1_IO00 输出高电平，那么就应该设置 GPIO1.DR=1。
+	 * GDIR 寄存器，这是方向寄存器，用来设置某个 GPIO 的工作方向的，即输入/输出，
+	 * PSR 寄存器也是一个 GPIO 对应一个位，读取相应的位即可获取对应的 GPIO 的状态，也就是 GPIO 的高低电平值。
+	 * ICR1和ICR2这两个寄存器，都是中断控制寄存器， ICR1用于配置低16个GPIO，ICR2 用于配置高 16 个 GPIO
+	 * EDGE_SEL 寄存器用来设置边沿中断
+	 * IMR 寄存器，这是中断屏蔽寄存器
+	 * ISR 寄存器也是 32 位寄存器，一个 GPIO 对应一个位，只要某个 GPIO 的中断发生，那么 ISR 中相应的位就会被置 1。
+code:
+	/* 初始化GPIO,GPIO1_IO03设置为输出 */
+	GPIO1_GDIR = 0X0000008;	
+
+
+E:控制 GPIO 的输出电平
+code:
+	/* 设置GPIO1_IO03输出低电平，打开LED0 */
+	GPIO1_DR = 0X0;
+
+

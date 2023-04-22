@@ -1,0 +1,166 @@
+时钟信号
+step 1:使能 I.MX6U 所有外设时钟
+    void clk_enable(void)
+    {
+        CCM->CCGR0 = 0XFFFFFFFF;
+        CCM->CCGR1 = 0XFFFFFFFF;
+        CCM->CCGR2 = 0XFFFFFFFF;
+        CCM->CCGR3 = 0XFFFFFFFF;
+        CCM->CCGR4 = 0XFFFFFFFF;
+        CCM->CCGR5 = 0XFFFFFFFF;
+        CCM->CCGR6 = 0XFFFFFFFF;
+    }
+
+step 2:初始化系统时钟 528Mhz,并且设置 PLL2 和 PLL3 各个 PFD 时钟
+2.1 设置 ARM 内核时钟为 528MHz
+2.2 设置 PLL2(SYS PLL)各个 PFD
+2.3 设置 PLL3(USB1)各个 PFD
+2.4 设置 AHB 时钟 最小 6Mhz, 最大 132Mhz
+2.5 设置 IPG_CLK_ROOT 最小 3Mhz,最大 66Mhz
+2.6 设置 PERCLK_CLK_ROOT 时钟
+
+
+step 3: 代码分析
+修改 I.MX6U 主频的步骤如下：
+
+A:设置主频，设置 ARM 内核时钟为 528MHz：
+    /* 设置寄存器 CCSR 的 STEP_SEL 位，当为0时， step_clk 的时钟源为 24M 的晶振。
+     * 设置寄存器 CCSR 的 PLL1_SW_CLK_SEL 位，在设置好CCSR 的 STEP_SEL 位后，或上 (1 << 2)， 
+     * 设置 pll1_sw_clk 的时钟源为 step_clk时钟源，即 24MHz
+    if((((CCM->CCSR) >> 2) & 0x1 ) == 0) 	/* 判断当前pll1_sw_clk使用的是不是pll1_main_clk时钟 */
+    {	
+        /* 如果是，就换成备用时钟  1<<7的意思是将 0000 0001按照二进制左移8位，也就是1000 0000，
+         * 寄存器 ~(1 << 8)的意思是得到的结果是 ~（0000 0001【STEP_SEL位】 0000 0000） 取反为 1111 1110 1111 1111 
+         * 设置寄存器 CCSR 的 STEP_SEL 位，当STEP_SEL等于 0 时，step_clk 的时钟源为 24M 的晶振。*/
+        CCM->CCSR &= ~(1 << 8);				
+
+        /* 设置寄存器 CCSR 的 PLL1_SW_CLK_SEL 位，配置pll1_sw_clk时钟源为 step_clk 即为24MHz，
+         *（通过这一步我们就将 I.MX6U 的主频先设置为 24MHz *
+         *  将 1111 1110 1111 1111 | 0000 0000 0000 0100 = 0000 0000 0000 1【PLL1_SW_CLK_SEL位】000*/
+        CCM->CCSR |= (1 << 2);				
+    }
+
+
+    /* 设置寄存器 CCM_ANALOG_PLL_ARMn，将 pll1_main_clk(PLL1)设置为 1056MHz */
+     * 0x7F等于0111 1111也就是代表着寄存器 CCM_ANALOG_PLL_ARMn 的 [6：0]位，也就是寄存器的输出频率，((88 << 0) & 0X7F)= 88，0101 1000 
+     * (1 << 13) | ((88 << 0) & 0X7F)=0010 0000 0101 1000 即[6：0]位对应的还是88，
+     * 而第14位代表BYPASS_CLK_SRC,BYPASS_CLK_SRC = 1代表CLK1 - Select the CLK1_N/CLK1_P，
+     * 所以频率位 CLK=24 * 88 /2.0 = 1056 */
+    CCM_ANALOG->PLL_ARM = (1 << 13) | ((88 << 0) & 0X7F);  
+
+    /* 通过修改寄存器，将 pll_sw_clk 时钟切换回 pll1_main_clk */
+    CCM->CCSR &= ~(1 << 2);                                 
+
+    /* 寄存器 CCM_CACRR 只有 ARM_PODF 位，可以设置为 0~7，分别对应 1~8 分频。如果要设置为2分频的话CCM_CACRR就要设置为1
+     * 最后设置寄存器 CCM_CACRR 的 ARM_PODF 为 2 分频，ARM 内核时钟为 pll1_sw_clk/2=1056/2=528Mhz */
+    CCM->CACRR = 1;           
+
+
+B:PFD 时钟设置：
+B.1 设置 PLL2(SYS PLL)各个 PFD：
+
+    /* 先设置 PLL2 的 4 路 PFD 频率，用到寄存器是 CCM_ANALOG_PFD_528n, */
+	reg = CCM_ANALOG->PFD_528;
+
+    /* 寄存器 CCM_ANALOG_PFD_528n 其实分为四组，分别对应PFD0~PFD3。PFD0_FRAC[5:0],PFD1_FRAC[5:0],PFD2_FRAC[5:0],PFD3_FRAC[5:0]
+     * PFD0_STABLE,判断 PLL2_PFD0 是否稳定,PFD0_CLKGATE: PLL2_PFD0 输出使能位,1 的时候关闭 PLL2_PFD0 的输出，为 0 的时候使能输出。
+     * 清除原来的设置 */
+	reg &= ~(0X3F3F3F3F);	
+
+    /* 计算公式为 528*18/PFD0_FRAC */
+	reg |= 32<<24;				/* 寄存器内容：0010 0000 = 32，PLL2_PFD3=528*18/32=297Mhz */
+	reg |= 24<<16;				/* 寄存器内容：0001 1000 = 24，PLL2_PFD2=528*18/24=396Mhz(DDR使用的时钟，最大400Mhz) */
+	reg |= 16<<8;				/* 寄存器内容：0001 0000 = 16，PLL2_PFD1=528*18/16=594Mhz */
+	reg |= 27<<0;				/* 寄存器内容：0001 1011 = 27，PLL2_PFD0=528*18/27=352Mhz */
+
+	CCM_ANALOG->PFD_528=reg;	/* 将 reg 赋值给寄存器之后，将参数 reg 用于下一个 PLL 调用。设置PLL2_PFD0~3 */
+
+B.2 设置PLL3(USB1)各个PFD
+    /* 设置 PLL3_PFD0~PLL3_PFD3 这 4 路 PFD 的频率 ， 使用到的寄存器是CCM_ANALOG_PFD_480n。*/
+	/* 设置PLL3(USB1)各个PFD */
+	reg = 0;					/* 清零   */
+	reg = CCM_ANALOG->PFD_480;
+	reg &= ~(0X3F3F3F3F);		/* 清除原来的设置 					 */
+	reg |= 19<<24;				/* PLL3_PFD3=480*18/19=454.74Mhz 	*/
+	reg |= 17<<16;				/* PLL3_PFD2=480*18/17=508.24Mhz 	*/
+	reg |= 16<<8;				/* PLL3_PFD1=480*18/16=540Mhz		*/
+	reg |= 12<<0;				/* PLL3_PFD0=480*18/12=720Mhz	 	*/
+	CCM_ANALOG->PFD_480=reg;	/* 设置PLL3_PFD0~3 					*/	
+
+
+C:AHB、IPG 和 PERCLK 根时钟设置
+C.1 
+	/*设置AHB时钟 最小6Mhz， 最大132Mhz (boot rom自动设置好了可以不用设置)*/
+    /* 清除设置  ~(3 << 18) = ~(1100 0000 0000 0000 0000) = 0011 1111 1111 1111 1111 
+     * 寄存器 CCM_CBCMR的PERIPH2_CLK2_SEL位： periph2_clk2 时钟源选择为 0 的时候选择 pll3_sw_clk，为 1 的时候选择 OSC
+     * PRE_PERIPH2_CLK_SEL为0 选择 PLL2， 01 选择 PLL2_PFD2，10 选择 PLL2_PFD0， 11 选择 PLL4，这里选择的是 00 
+     */ 
+	CCM->CBCMR &= ~(3 << 18); 
+
+    /* 0111 1111 1111 1111 1111 代表的意思是 
+     * PERIPH2_CLK2_SEL为1的 1 的时候选择 OSC，
+     * PRE_PERIPH2_CLK_SEL为0 选择 PLL2， 01 选择 PLL2_PFD2，10 选择 PLL2_PFD0， 11 选择 PLL4，这里选择的是 01
+     */
+	CCM->CBCMR |= (1 << 18);	/* pre_periph_clk=PLL2_PFD2=396MHz */
+
+	CCM->CBCDR &= ~(1 << 25);	/* periph_clk=pre_periph_clk=396MHz */
+
+	while(CCM->CDHIPR & (1 << 5));/* 等待握手完成 */
+		
+
+C.2 
+	/* 修改AHB_PODF位的时候需要先禁止AHB_CLK_ROOT的输出，但是
+	 * 我没有找到关闭AHB_CLK_ROOT输出的的寄存器，所以就没法设置。
+	 * 下面设置AHB_PODF的代码仅供学习参考不能直接拿来使用！！
+	 * 内部boot rom将AHB_PODF设置为了3分频，即使我们不设置AHB_PODF，
+	 * AHB_ROOT_CLK也依旧等于396/3=132Mhz。*/
+#if 0
+	/* 要先关闭AHB_ROOT_CLK输出，否则时钟设置会出错 */
+	CCM->CBCDR &= ~(7 << 10);	/* CBCDR的AHB_PODF清零 */
+	CCM->CBCDR |= 2 << 10;		/* AHB_PODF 3分频，AHB_CLK_ROOT=132MHz */
+	while(CCM->CDHIPR & (1 << 1));/* 等待握手完成 */
+#endif
+	
+
+C.3 设置 IPG_CLK_ROOT 最小 3Mhz,最大 66Mhz(boot rom自动设置好了可以不用设置)
+	/* ~(3 << 8) = 1100 1111 1111 CBCDR 的 IPG_PODF 清零，IPG_PODF 不分频*/
+	CCM->CBCDR &= ~(3 << 8);	
+
+    /* (1100 1111 1111) | (0001 0000 0000) = 1101 1111 1111 ,IPG_PODF 2分频，IPG_CLK_ROOT=66MHz*/
+	CCM->CBCDR |= 1 << 8;		
+	
+C.4 设置 PERCLK_CLK_ROOT 时钟   
+	/*  ~(1 << 6) = 1011 1111 ,因为CCM_CSCMR1[6]=0, PERCLK_CLK_ROOT时钟源为IPG */
+	CCM->CSCMR1 &= ~(1 << 6);	
+
+    /* （ 1011 1111 ）& ~(7 << 0) = 0000 1000，PERCLK_PODF位清零，即1分频 */
+	CCM->CSCMR1 &= ~(7 << 0);	
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
